@@ -1,80 +1,64 @@
 import cv2
-import face_recognition
 import os
-import csv
-from datetime import datetime, timedelta
+import numpy as np
+import time
+from datetime import datetime
 
-# Folder with reference images
-KNOWN_PEOPLE_DIR = "people_images"
+path = 'students'
+recognizer = cv2.face.LBPHFaceRecognizer_create()
+detector = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 
-# Load known faces
-known_encodings = []
-known_names = []
+def get_images_and_labels(path):
+    image_paths = [os.path.join(path, f) for f in os.listdir(path)]
+    face_samples = []
+    ids = []
+    name_map = {}
 
-for filename in os.listdir(KNOWN_PEOPLE_DIR):
-    if filename.lower().endswith((".png", ".jpg", ".jpeg")):
-        path = os.path.join(KNOWN_PEOPLE_DIR, filename)
-        image = face_recognition.load_image_file(path)
-        encodings = face_recognition.face_encodings(image)
-        if encodings:
-            known_encodings.append(encodings[0])
-            known_names.append(os.path.splitext(filename)[0])
+    for i, image_path in enumerate(image_paths):
+        img = cv2.imread(image_path, cv2.IMREAD_GRAYSCALE)
+        name = os.path.split(image_path)[-1].split(".")[0]
+        
+        faces = detector.detectMultiScale(img)
+        for (x, y, w, h) in faces:
+            face_samples.append(img[y:y+h, x:x+w])
+            ids.append(i)
+            name_map[i] = name
+    return face_samples, ids, name_map
 
-print(f"[INFO] Loaded {len(known_encodings)} known faces.")
+print("Training recognizer...")
+faces, ids, name_mapping = get_images_and_labels(path)
+recognizer.train(faces, np.array(ids))
 
-# CSV file for logging
-attendance_file = "attendance.csv"
-if not os.path.exists(attendance_file):
-    with open(attendance_file, "w", newline="") as f:
-        writer = csv.writer(f)
-        writer.writerow(["Name", "Date", "Time"])
+def markAttendance(name):
+    with open('attendance.txt', 'a+') as f:
+        f.seek(0)
+        lines = f.readlines()
+        names_in_file = [line.split(',')[0] for line in lines]
+        if name not in names_in_file:
+            now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            f.write(f"{name}, {now}\n")
 
-# Dictionary to track last log time for each person
-last_logged = {}
-
-# Start webcam
 cap = cv2.VideoCapture(0)
-if not cap.isOpened():
-    print("Error: Could not open camera.")
-    exit()
-
-COOLDOWN_SECONDS = 5  # Minimum time between logs for the same person
+last_check = time.time()
 
 while True:
-    ret, frame = cap.read()
-    if not ret:
-        break
+    ret, img = cap.read()
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
 
-    small_frame = cv2.resize(frame, (0, 0), fx=0.25, fy=0.25)
-    rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+    if time.time() - last_check > 2:
+        faces = detector.detectMultiScale(gray, 1.3, 5)
+        
+        for (x, y, w, h) in faces:
+            id_num, confidence = recognizer.predict(gray[y:y+h, x:x+w])
 
-    # Detect faces
-    face_locations = face_recognition.face_locations(rgb_small_frame)
-    face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
+            if confidence < 70:
+                name = name_mapping[id_num]
+                markAttendance(name)
+                print(f"Matched: {name} ({round(100 - confidence)}% match)")
+        
+        last_check = time.time()
 
-    for (top, right, bottom, left), face_encoding in zip(face_locations, face_encodings):
-        # Match face
-        matches = face_recognition.compare_faces(known_encodings, face_encoding, tolerance=0.5)
-        if True in matches:
-            match_index = matches.index(True)
-            name = known_names[match_index]
-
-            # Scale coordinates
-            top *= 4; right *= 4; bottom *= 4; left *= 4
-            cv2.rectangle(frame, (left, top), (right, bottom), (0, 255, 0), 2)
-            cv2.putText(frame, name, (left, top - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-
-            # Check cooldown before logging
-            now = datetime.now()
-            if name not in last_logged or (now - last_logged[name]).total_seconds() >= COOLDOWN_SECONDS:
-                with open(attendance_file, "a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([name, now.date(), now.strftime("%H:%M:%S")])
-                last_logged[name] = now  # update last logged time
-
-    cv2.imshow("Attendance System", frame)
-
+    cv2.imshow('Attendance System', img)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
